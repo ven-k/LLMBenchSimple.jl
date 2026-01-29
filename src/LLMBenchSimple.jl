@@ -5,8 +5,7 @@ export @bench, setup_problem, grade, list_problems, split_problem_id,
        get_bash_uid, unprivileged, chown_unprivileged
 
 using Test
-using Base.ScopedValues: ScopedValue, LazyScopedValue, @with
-using Base: OncePerProcess
+using Base.ScopedValues: ScopedValue, @with
 using LibGit2
 using Base.Meta
 
@@ -16,13 +15,23 @@ include("testset_handling.jl")
 # Include patch utilities
 include("patch_utils.jl")
 
-# Lazy scoped value for workdir - initialized from environment when first accessed
-# This uses the new LazyScopedValue API from Julia 1.13+ (PR #59372)
-const WORKDIR_CONTEXT = LazyScopedValue{Union{String,Nothing}}(
-    OncePerProcess{Union{String,Nothing}}() do
-        get(ENV, "LLMBENCH_WORKSPACE", nothing)
-    end
-)
+# Compatibility layer for Julia 1.11 vs 1.13+
+# LazyScopedValue and OncePerProcess were added in Julia 1.13 (PR #59372)
+if isdefined(Base.ScopedValues, :LazyScopedValue) && isdefined(Base, :OncePerProcess)
+    # Julia 1.13+: use the new LazyScopedValue API
+    using Base.ScopedValues: LazyScopedValue
+    using Base: OncePerProcess
+
+    const WORKDIR_CONTEXT = LazyScopedValue{Union{String,Nothing}}(
+        OncePerProcess{Union{String,Nothing}}() do
+            get(ENV, "LLMBENCH_WORKSPACE", nothing)
+        end
+    )
+else
+    # Julia 1.11-1.12: use regular ScopedValue with default value
+    # Initialization will happen on first access via llmbench_workdir()
+    const WORKDIR_CONTEXT = ScopedValue{Union{String,Nothing}}(nothing)
+end
 
 # Debug scoped value - when true, temp directories are persisted and logged
 const DEBUG_BENCH = ScopedValue{Bool}(false)
@@ -105,8 +114,16 @@ end
 
 # Function to get the current workdir from context
 function llmbench_workdir()
-    # LazyScopedValue automatically handles lazy initialization from the OncePerProcess default
     workdir = WORKDIR_CONTEXT[]
+
+    # For Julia 1.11-1.12 compatibility: check environment if workdir is not set
+    if workdir === nothing && !isdefined(Base.ScopedValues, :LazyScopedValue)
+        # Fallback: try to get from environment variable
+        env_workdir = get(ENV, "LLMBENCH_WORKSPACE", nothing)
+        if env_workdir !== nothing
+            return env_workdir
+        end
+    end
 
     if workdir === nothing
         error("llmbench_workdir() can only be called within a benchmark setup or grading context, or with LLMBENCH_WORKSPACE environment variable set")
